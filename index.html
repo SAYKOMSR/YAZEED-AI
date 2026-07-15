@@ -860,6 +860,11 @@
           <button class="calc-btn" onclick="calcInput('.')">.</button>
           <button class="calc-btn eq" onclick="calcEquals()">=</button>
         </div>
+        <div class="tool-row" style="margin-top:16px">
+          <input type="text" class="tool-input" id="calcAiInput" placeholder="🤖 اسأل مسألة حسابية معقدة أو كلامية...">
+          <button class="tool-btn" onclick="calcAiSolve()">حل ✨</button>
+        </div>
+        <div class="tool-output" id="calcAiOutput" style="display:none; margin-top:10px"></div>
       </div>
     </div>
 
@@ -889,6 +894,9 @@
         <div class="tool-row">
           <input type="text" class="tool-input" id="noteInput" placeholder="اكتب ملاحظة جديدة..." style="min-height:48px">
           <button class="tool-btn" onclick="addNote()">إضافة ➕</button>
+        </div>
+        <div class="tool-row" style="margin-top:8px">
+          <button class="tool-btn" style="width:100%" onclick="improveNoteWithAI()">🤖 حسّن الصياغة بالذكاء الاصطناعي</button>
         </div>
       </div>
       <div id="notesList" style="display:flex; flex-direction:column; gap:10px"></div>
@@ -966,18 +974,26 @@ function resetAll() {
 // لو عايز تغيّر الرابط بعدين، غيّره هنا بس
 const WORKER_URL = 'https://yazeed-ai-proxy.y9669210.workers.dev';
 
-// دالة عامة بتكلم Groq (Llama) عن طريق السيرفر الوسيط
+// دالة عامة بتكلم Gemini عن طريق السيرفر الوسيط - بصيغة Gemini الأصلية
+// مع تفعيل خاصية البحث الحقيقي على Google (Grounding) عشان يعرف معلومات فعلية ولحظية
 // messages: مصفوفة رسائل [{role, content}], system: تعليمات الشخصية
 async function callClaudeAPI(messages, system) {
-  // Groq بيستخدم شكل OpenAI: الـ system بيتحط كرسالة جوه المصفوفة نفسها
-  const fullMessages = [{ role: "system", content: system }, ...messages];
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('ar-EG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  const timeNote = `\n\nملحوظة: التاريخ الفعلي دلوقتي هو ${dateStr}. لو المستخدم سأل عن حدث حديث جداً أو نتيجة مباراة أو خبر عاجل ممكن تكون معلوماتك عنه غير مكتملة، وضّحله كده بس من غير ما تكررها في كل رد.`;
 
-  const response = await fetch(WORKER_URL, {
+  const model = "gemini-3.1-flash-lite";
+  const contents = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }]
+  }));
+
+  const response = await fetch(`${WORKER_URL}?model=${model}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-     model: "gemini-3.1-flash-lite",
-      messages: fullMessages
+      contents: contents,
+      systemInstruction: { parts: [{ text: system + timeNote }] }
     })
   });
 
@@ -988,8 +1004,12 @@ async function callClaudeAPI(messages, system) {
   if (!response.ok) throw new Error(`API error ${response.status}: ${data.error ? data.error.message : raw.slice(0, 200)}`);
   if (data.error) throw new Error(data.error.message || 'API error');
 
-  return data.choices && data.choices[0] ? data.choices[0].message.content : '';
+  const candidate = data.candidates && data.candidates[0];
+  if (!candidate || !candidate.content || !candidate.content.parts) return '';
+  return candidate.content.parts.map(p => p.text || '').join('');
 }
+
+// ملحوظة: توليد الصور بقى شغال عن طريق Pollinations AI (تحت)، مش محتاج مفتاح ولا سيرفر وسيط
 
 // ===== CHAT (مربوط بذكاء اصطناعي حقيقي) =====
 let chatHistory = []; // بيحتفظ بسياق المحادثة كاملاً
@@ -1178,13 +1198,37 @@ const quizData = {
   ],
 };
 
+const quizCategoryNames = {
+  general: 'معرفة عامة', science: 'علوم', history: 'تاريخ', math: 'رياضيات', tech: 'تكنولوجيا'
+};
+
 let currentQuiz = [];
 let quizIndex = 0;
 let quizScore = 0;
 
-function startQuiz() {
+async function startQuiz() {
   const cat = document.getElementById('quizCategory').value;
-  currentQuiz = [...quizData[cat]].sort(() => Math.random() - 0.5);
+  const area = document.getElementById('quizArea');
+  area.innerHTML = '<div class="tool-card" style="text-align:center"><div class="typing-indicator" style="justify-content:center"><span></span><span></span><span></span></div><p class="desc" style="margin-top:10px">جاري توليد أسئلة جديدة بالذكاء الاصطناعي...</p></div>';
+
+  const QUIZ_SYSTEM = `أنت مولّد أسئلة اختبارات تعليمية. لما المستخدم يبعتلك اسم مجال، ولّد 6 أسئلة اختيار من متعدد جديدة ومتنوعة في المجال ده (تفادى تكرار نفس الأسئلة الشائعة اللي غالباً مكررة، جرب تنويع الصعوبة والمواضيع الفرعية). كل سؤال ليه 4 اختيارات واختيار واحد صح بس.
+رجّع الرد بصيغة JSON بس، من غير أي نص إضافي أو علامات markdown أو backticks، بالشكل ده بالظبط:
+[{"q":"نص السؤال","opts":["اختيار1","اختيار2","اختيار3","اختيار4"],"ans":0}, ...]
+حيث ans هو index الاختيار الصحيح (0 لأول اختيار، 1 للتاني، وهكذا).`;
+
+  try {
+    const raw = await callClaudeAPI([{ role: 'user', content: `مجال: ${quizCategoryNames[cat]}` }], QUIZ_SYSTEM);
+    const cleaned = raw.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('صيغة غير متوقعة');
+    currentQuiz = parsed;
+  } catch (err) {
+    console.error('Quiz AI error, falling back to local questions:', err);
+    showToast('⚠️ تعذّر توليد أسئلة جديدة، هنستخدم أسئلة احتياطية');
+    currentQuiz = [...quizData[cat]].sort(() => Math.random() - 0.5);
+  }
+
   quizIndex = 0;
   quizScore = 0;
   showQuestion();
@@ -1289,40 +1333,131 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ===== IMAGE GENERATOR =====
-function generateImage() {
+// حل مسائل حسابية معقدة أو كلامية بالذكاء الاصطناعي
+async function calcAiSolve() {
+  const q = document.getElementById('calcAiInput').value.trim();
+  const output = document.getElementById('calcAiOutput');
+  if (!q) { showToast('⚠️ اكتب مسألة أولاً'); return; }
+
+  output.style.display = 'block';
+  output.className = 'tool-output';
+  output.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+
+  const CALC_SYSTEM = `أنت مساعد رياضيات. حل المسألة اللي هيبعتها المستخدم خطوة بخطوة بشكل واضح ومختصر، واكتب الناتج النهائي بوضوح في الآخر.`;
+
+  try {
+    const answer = await callClaudeAPI([{ role: 'user', content: q }], CALC_SYSTEM);
+    output.innerHTML = escapeHtml(answer).replace(/\n/g, '<br>');
+  } catch (err) {
+    console.error('Calc AI error:', err);
+    output.innerHTML = `⚠️ في مشكلة في الاتصال.<br>تفاصيل الخطأ: ${escapeHtml(err.message)}`;
+  }
+}
+
+// ===== IMAGE GENERATOR (Pollinations AI - مجاني بالكامل، بدون مفتاح) =====
+async function generateImage() {
   const prompt = document.getElementById('imgPrompt').value.trim();
   const preview = document.getElementById('imgPreview');
   if (!prompt) { showToast('⚠️ الرجاء إدخال وصف للصورة'); return; }
 
-  preview.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+  preview.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div><p class="desc" style="text-align:center;margin-top:8px">جاري تجهيز الوصف وتوليد الصورة (ممكن ياخد لحد 30 ثانية)...</p>';
 
-  // Generate image using DiceBear API (no key needed)
-  const seed = encodeURIComponent(prompt + Date.now());
+  // نترجم الوصف لإنجليزي إجبارياً - النصوص العربية بتسبب مشاكل في رابط الصورة أحياناً
+  let finalPrompt;
+  const IMG_PROMPT_SYSTEM = `حوّل وصف الصورة اللي هيديهولك المستخدم (بأي لغة) إلى وصف إنجليزي واحد دقيق ومفصّل ومناسب لمولّد صور AI. حافظ على كل تفاصيل الوصف الأصلي بالظبط من غير ما تضيف أو تشيل عناصر. رجّع الوصف الإنجليزي بس من غير أي مقدمات أو علامات اقتباس.`;
+  try {
+    const improved = await callClaudeAPI([{ role: 'user', content: prompt }], IMG_PROMPT_SYSTEM);
+    if (!improved || !improved.trim()) throw new Error('رد فاضي');
+    finalPrompt = improved.trim();
+  } catch (e) {
+    console.error('فشلت ترجمة الوصف:', e);
+    preview.innerHTML = `
+      <div style="width:100%; padding:24px; border-radius:12px;
+        background: linear-gradient(135deg, var(--primary), var(--accent));
+        display:flex; align-items:center; justify-content:center;
+        flex-direction:column; color:white; text-align:center;">
+        <div style="font-size:36px; margin-bottom:12px">⚠️</div>
+        <div style="font-size:13px">حصلت مشكلة في تجهيز الوصف قبل التوليد.</div>
+        <div style="font-size:12px; margin-top:6px; opacity:0.9">${escapeHtml(e.message)}</div>
+      </div>
+    `;
+    return;
+  }
+
+  const seed = Math.floor(Math.random() * 1000000);
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(finalPrompt)}?width=768&height=768&seed=${seed}&nologo=true&model=flux`;
+
+  let done = false;
   const img = new Image();
+
+  const timeoutId = setTimeout(() => {
+    if (!done) {
+      done = true;
+      preview.innerHTML = `
+        <div style="width:100%; padding:24px; border-radius:12px;
+          background: linear-gradient(135deg, var(--primary), var(--accent));
+          display:flex; align-items:center; justify-content:center;
+          flex-direction:column; color:white; text-align:center;">
+          <div style="font-size:36px; margin-bottom:12px">⏳</div>
+          <div style="font-size:13px">الخدمة بطيئة دلوقتي أو مزدحمة، جرب تاني كمان شوية</div>
+        </div>
+      `;
+    }
+  }, 45000);
+
   img.onload = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(timeoutId);
     preview.innerHTML = '';
+    img.style.width = '100%';
+    img.style.borderRadius = '12px';
     preview.appendChild(img);
   };
   img.onerror = () => {
-    // Fallback: use a gradient placeholder
+    if (done) return;
+    done = true;
+    clearTimeout(timeoutId);
     preview.innerHTML = `
-      <div style="width:100%; height:300px; border-radius:12px;
+      <div style="width:100%; padding:24px; border-radius:12px;
         background: linear-gradient(135deg, var(--primary), var(--accent));
         display:flex; align-items:center; justify-content:center;
-        flex-direction:column; color:white;">
-        <div style="font-size:48px; margin-bottom:12px">🎨</div>
-        <div style="font-size:14px">${escapeHtml(prompt)}</div>
-        <div style="font-size:12px; margin-top:8px; opacity:0.7">صورة مولّدة بواسطة Yazeed AI</div>
+        flex-direction:column; color:white; text-align:center;">
+        <div style="font-size:36px; margin-bottom:12px">⚠️</div>
+        <div style="font-size:13px">حصلت مشكلة في تحميل الصورة، جرب تاني بعد شوية</div>
       </div>
     `;
   };
-  img.src = `https://api.dicebear.com/7.x/art/svg?seed=${seed}`;
-  img.style.width = '100%';
+  img.src = url;
 }
 
 // ===== NOTES =====
 let notes = [];
+
+// تحسين صياغة الملاحظة بالذكاء الاصطناعي قبل الحفظ
+async function improveNoteWithAI() {
+  const input = document.getElementById('noteInput');
+  const text = input.value.trim();
+  if (!text) { showToast('⚠️ اكتب ملاحظة أولاً عشان أحسّنها'); return; }
+
+  const original = input.value;
+  input.value = '... جاري التحسين ✨';
+  input.disabled = true;
+
+  const NOTE_SYSTEM = `أنت مساعد كتابة. حسّن صياغة الملاحظة اللي هيبعتها المستخدم (وضّح الأفكار، صحح الأخطاء الإملائية، نظّمها) من غير ما تغيّر المعنى أو تزوّد حاجات جديدة. رجّع النص المحسّن بس من غير أي مقدمات.`;
+
+  try {
+    const improved = await callClaudeAPI([{ role: 'user', content: original }], NOTE_SYSTEM);
+    input.value = improved;
+    showToast('✅ تم تحسين الصياغة');
+  } catch (err) {
+    console.error('Note AI error:', err);
+    input.value = original;
+    showToast('⚠️ في مشكلة في الاتصال: ' + err.message);
+  } finally {
+    input.disabled = false;
+  }
+}
 
 function addNote() {
   const input = document.getElementById('noteInput');
@@ -1350,7 +1485,7 @@ function renderNotes() {
   const list = document.getElementById('notesList');
   if (notes.length === 0) {
     list.innerHTML = '<div class="tool-output empty" style="text-align:center">لا توجد ملاحظات بعد. أضف ملاحظة جديدة! 📝</div>';
-    return;
+    return; up
   }
 
   // Sort: pinned first
